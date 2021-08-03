@@ -1,0 +1,176 @@
+desc: MIDI Chip Arpeggiator
+//tags: MIDI processing
+
+slider1:0<0,2,1{x BPM,x 25hz,x 30hz}>Rate Mode
+slider2:1<0.25,16,0.25>Rate
+slider3:1<0.01,1,0.1>Note Length
+slider4:0<0,1,1{Up,Down}>Mode
+
+slider5:1<0,4,1>Envelope Points
+
+slider6:127<1,127,1>V1
+slider7:16<0,256,1>T1
+slider8:1<1,127,1>V2
+slider9:0<0,256,1>T2
+slider10:1<1,127,1>V3
+slider11:0<0,256,1>T3
+slider12:1<1,127,1>V4
+slider13:0<0,256,1>T4
+slider14:1<1,127,1>VE
+
+slider15:7<1,7,1>Volume Bit Depth
+
+in_pin:none
+out_pin:none
+
+@init 
+notelist=0;
+notecnt=0;
+lastnote=-1;
+oldnote = lastnote;
+pbincpos=0;
+pbnotepos=0;
+
+cvelstage=0;
+cvelcount=0;
+cvel = 127;
+
+@slider 
+rateMode=slider1;
+rate=slider2;
+notelen=slider3;
+notelen<0?notelen=0:notelen>1?notelen=1;
+notedir=(slider4&1)?-1:1;
+
+pointCount=slider5;
+
+v1=slider6;
+t1=slider7;
+v2=slider8;
+t2=slider9;
+v3=slider10;
+t3=slider11;
+v4=slider12;
+t4=slider13;
+ve=slider14;
+bit=slider15;
+
+@block
+
+lastnotecnt=notecnt;
+
+
+while (
+midirecv(ts,msg1,msg23) ? 
+(
+  m=msg1&240;
+  note=msg23&127;
+  (m == 9*16 && msg23>=256) ? 
+  (
+    notelist[note] < 0.001 ? (
+      notelist[note]=((msg23/256.0)|0);
+      notecnt<1?(cvelstage=0);
+      notecnt+=1;
+    );
+  ) : (m == 8*16 || m == 9*16) ? (
+    notelist[note] > 0.001 ? (
+      lastnote==note ? (
+        midisend(ts,8*16,note); // send note off
+        lastnote=-1;
+      );
+          
+      notecnt-=1;
+      notelist[note]=0.0; 
+    );
+  ) : (
+    midisend(ts,msg1,msg23); 
+  );
+  bla=1;
+);
+);
+notecnt < 1 && lastnote>=0 ? 
+(
+  midisend(0,8*16,lastnote); // send note off
+  lastnote=-1;
+);   
+
+spos=0;
+rateMode==0?(dinc=1/srate*(tempo/60)*rate) :
+rateMode==1?(dinc=1/srate*(25)*rate) :
+rateMode==2?(dinc=1/srate*(30)*rate);
+
+notecnt > 0 && !lastnotecnt ? 
+  (
+    pbincpos=1;
+    pbnotepos=0;
+    pbvarpos=1000;
+  );
+
+@sample
+pbincpos+=dinc;
+notecnt > 0 && pbincpos >= notelen ? (
+  lastnote>=0 ? 
+  (
+    midisend(spos,8*16,lastnote); // send note off
+    lastnote=-1;
+  );   
+);
+notecnt > 0 && pbincpos >= 1.0 ?
+(
+  pbincpos-=1;
+  // calc new lastnote
+  !notelist[pbnotepos] || 1? 
+  (
+    // next note
+    cnt=0;
+    while
+    (
+      // find the next note to play
+      cnt+=1;
+      pbnotepos += notedir;
+      pbnotepos > 127? pbnotepos=0 : pbnotepos<0 ? pbnotepos=127;
+      
+      notelist[pbnotepos] > 0.001 ? 
+      // play the note
+      (
+        pbnotepos >= 0 && pbnotepos < 128 ? (
+          lastnote=pbnotepos;
+          cvelstage==0?(cvelstage=1;cvel=v1;cvelcount=0);
+          
+          cvelstage==1? (cvelcount>=t1  ? (cvelstage=2;cvelcount=0;cvel=v2) :
+           cvelstage==pointCount ?
+            (cvel = v1 + (cvelcount/t1)*(ve-v1)) :
+            (cvel = v1 + (cvelcount/t1)*(v2-v1)));
+           
+          cvelstage==2? (cvelcount>=t2  ? (cvelstage=3;cvelcount=0;cvel=v3) : 
+           cvelstage==pointCount ? 
+            (cvel = v2 + (cvelcount/t2)*(ve-v2)) :
+            (cvel = v2 + (cvelcount/t2)*(v3-v2)));
+
+          cvelstage==3? (cvelcount>=t3  ? (cvelstage=4;cvelcount=0;cvel=v4) :
+           cvelstage==pointCount ?
+            (cvel = v3 + (cvelcount/t3)*(ve-v3)) :
+            (cvel = v3 + (cvelcount/t3)*(v4-v3)));
+           
+          cvelstage==4? (cvelcount>=t4  ? (cvelstage=5;cvelcount=0;cvel=ve) : 
+            (cvel = v4 + (cvelcount/t4)*(ve-v4)));
+                     
+          cvelstage>pointCount?cvelstage=5;
+           
+          cvelstage==5? cvel = ve;
+          
+          
+          cvel<1?cvel=1 : cvel > 127 ? cvel=127 : cvel=floor(cvel); // clamp value
+          cvel = cvel >> (7-bit) << (7-bit);
+          
+          midisend(spos,9*16,lastnote+ceil ((cvel/127)*notelist[pbnotepos])*256); // send note on
+          cvelcount+=1;
+          
+        );
+        tmp=0;
+      )     
+      : cnt < 128;
+    );
+  )
+);
+
